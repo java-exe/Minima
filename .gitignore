@@ -11,9 +11,27 @@ data/raw/
 data/processed/
 *.bin
 
-# Checkpoints (zu gross fuer GitHub)
+# Checkpoints + Modelle (zu gross fuer GitHub)
 training/checkpoints/**
 !training/checkpoints/.gitkeep
+*.onnx
+*.pt
+*.ckpt
+
+# C / C++ Build-Artefakte
+build/
+*/build/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.pyd
+*.exe
+CMakeCache.txt
+CMakeFiles/
 
 # Experiment-Tracking
 wandb/
