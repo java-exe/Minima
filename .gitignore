@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Daten (zu gross / nicht versionieren)
+data/raw/
+data/processed/
+*.bin
+
+# Checkpoints (zu gross fuer GitHub)
+training/checkpoints/**
+!training/checkpoints/.gitkeep
+
+# Experiment-Tracking
+wandb/
+
+# Secrets / API Keys
+.env
+*.key
+
+# C# / Visual Studio
+frontend/SLMDemo/bin/
+frontend/SLMDemo/obj/
+.vs/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
