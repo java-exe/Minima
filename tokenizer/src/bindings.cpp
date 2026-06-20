@@ -9,6 +9,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(tokenizer_cpp, m) {
     py::class_<BPE>(m, "Tokenizer")
         .def(py::init<>())
+        .def(py::init<const std::string&>(), py::arg("path"))  // Tokenizer("vocab.bin")
         .def("train",  &BPE::train)
         .def("save",   &BPE::save)
         .def("load",   &BPE::load)
