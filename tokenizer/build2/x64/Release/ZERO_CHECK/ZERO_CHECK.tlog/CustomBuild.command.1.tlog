@@ -1,0 +1,10 @@
+^C:\USERS\JANST\ONEDRIVE\DOKUMENTE\MINIMA\TOKENIZER\BUILD2\CMAKEFILES\3B9E25E1F8E2CEF59B02C44B26DEE8F7\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/janst/OneDrive/Dokumente/Minima/tokenizer -BC:/Users/janst/OneDrive/Dokumente/Minima/tokenizer/build2 --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/janst/OneDrive/Dokumente/Minima/tokenizer/build2/tokenizer_cpp.slnx
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
