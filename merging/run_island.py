@@ -16,6 +16,7 @@ GETEILTEN Pfad (NFS / SMB / Syncthing / rclone-Mount / S3-FUSE).
 import argparse
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -38,7 +39,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--worker_id",   type=str, required=True)
     p.add_argument("--shared_dir",  type=str, required=True)
-    p.add_argument("--ckpt",        type=str, required=True, help="Init-Checkpoint")
+    p.add_argument("--ckpt",        type=str, default=None,
+                   help="Init-Checkpoint. Weglassen ⇒ aus dem Netz bootstrappen.")
+    p.add_argument("--seed_timeout", type=float, default=900.0,
+                   help="Wie lange auf einen Netz-Snapshot warten (Bootstrap)")
     p.add_argument("--train",       type=str, required=True)
     p.add_argument("--val",         type=str, required=True)
     p.add_argument("--gpu",         type=int, default=0)
@@ -66,8 +70,27 @@ def main():
     cfg = ModelConfigMoE()
     lb_weight = getattr(cfg, "load_balance_weight", 0.0)
 
+    transport = LocalDirTransport(args.shared_dir, args.worker_id)
+
     model = GPTModel(cfg).to(device)
-    model.load_state_dict(torch.load(args.ckpt, map_location=device)["model_state_dict"])
+    if args.ckpt:
+        sd = torch.load(args.ckpt, map_location=device)["model_state_dict"]
+        model.load_state_dict(sd)
+        print(f"[{args.worker_id}] Init aus lokalem Checkpoint: {args.ckpt}")
+    else:
+        # Bootstrap: Gewichte aus dem Netz ziehen (kein lokaler Checkpoint nötig)
+        print(f"[{args.worker_id}] Kein --ckpt — warte auf Netz-Snapshot ...")
+        deadline = time.time() + args.seed_timeout
+        snap = transport.fetch_latest()
+        while snap is None and time.time() < deadline:
+            time.sleep(5.0)
+            snap = transport.fetch_latest()
+        if snap is None:
+            raise SystemExit(f"[{args.worker_id}] Kein Snapshot in {args.shared_dir} "
+                             f"innerhalb {args.seed_timeout:.0f}s. Erst seeden "
+                             f"(merging/seed.py) oder einen anderen Worker starten.")
+        model.load_state_dict({k: v.to(device) for k, v in snap.state_dict.items()})
+        print(f"[{args.worker_id}] Init aus Netz-Snapshot von '{snap.worker_id}'.")
     optimizer = build_adamw(model.parameters(), lr=args.lr,
                             betas=(0.9, 0.95), weight_decay=0.1,
                             fused=dev.use_fused_adam)
@@ -83,8 +106,6 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(CodeDataset(args.val, context_length=cfg.context_length),
                             batch_size=args.batch_size, shuffle=False)
-
-    transport = LocalDirTransport(args.shared_dir, args.worker_id)
 
     coord = IslandCoordinator(
         model=model, optimizer=optimizer,

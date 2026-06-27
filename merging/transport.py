@@ -38,6 +38,12 @@ class Transport(ABC):
         (-1 wenn noch keine). Erlaubt verspäteten Workern den Wiedereinstieg."""
         ...
 
+    @abstractmethod
+    def fetch_latest(self) -> IslandSnapshot | None:
+        """Neuesten verfügbaren Snapshot holen (zum Bootstrappen eines neuen
+        Workers ohne lokalen Checkpoint). None wenn noch nichts da ist."""
+        ...
+
 
 class LocalDirTransport(Transport):
     """
@@ -84,11 +90,22 @@ class LocalDirTransport(Transport):
         return [torch.load(f, map_location="cpu", weights_only=False)
                 for f in files]
 
+    def _round_of(self, f: str) -> int:
+        try:
+            return int(os.path.basename(f).split("__")[0].split("_")[1])
+        except (IndexError, ValueError):
+            return -1
+
     def latest_round(self) -> int:
-        rounds = []
-        for f in glob.glob(os.path.join(self.dir, "round_*__*.pt")):
-            try:
-                rounds.append(int(os.path.basename(f).split("__")[0].split("_")[1]))
-            except (IndexError, ValueError):
-                pass
+        rounds = [self._round_of(f)
+                  for f in glob.glob(os.path.join(self.dir, "round_*__*.pt"))]
+        rounds = [r for r in rounds if r >= 0]
         return max(rounds) if rounds else -1
+
+    def fetch_latest(self) -> IslandSnapshot | None:
+        files = glob.glob(os.path.join(self.dir, "round_*__*.pt"))
+        if not files:
+            return None
+        # neueste Runde, bei Gleichstand die zuletzt geschriebene Datei
+        best = max(files, key=lambda f: (self._round_of(f), os.path.getmtime(f)))
+        return torch.load(best, map_location="cpu", weights_only=False)
