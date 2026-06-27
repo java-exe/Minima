@@ -35,6 +35,30 @@ from merging.device import (
 enable_utf8_stdout()
 
 
+def _wait_for_file(path: str, timeout: float, worker_id: str) -> str:
+    deadline = time.time() + timeout
+    while not os.path.exists(path):
+        if time.time() > deadline:
+            raise SystemExit(f"[{worker_id}] Datei nicht aufgetaucht (Sync?): {path}")
+        print(f"[{worker_id}] warte auf {os.path.basename(path)} ...")
+        time.sleep(5.0)
+    return path
+
+
+def resolve_data(args):
+    """Liefert (train_path, val_path) — entweder lokal oder aus dem Netz-Ordner."""
+    if args.data_dir:
+        from merging.shard_data import shard_name
+        tp = os.path.join(args.data_dir, shard_name(args.shard_index, args.num_shards))
+        vp = os.path.join(args.data_dir, "val.bin")
+        _wait_for_file(tp, args.seed_timeout, args.worker_id)
+        _wait_for_file(vp, args.seed_timeout, args.worker_id)
+        return tp, vp
+    if not (args.train and args.val):
+        raise SystemExit("Entweder --data_dir ODER --train und --val angeben.")
+    return args.train, args.val
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--worker_id",   type=str, required=True)
@@ -43,8 +67,12 @@ def main():
                    help="Init-Checkpoint. Weglassen ⇒ aus dem Netz bootstrappen.")
     p.add_argument("--seed_timeout", type=float, default=900.0,
                    help="Wie lange auf einen Netz-Snapshot warten (Bootstrap)")
-    p.add_argument("--train",       type=str, required=True)
-    p.add_argument("--val",         type=str, required=True)
+    p.add_argument("--train",       type=str, default=None,
+                   help="Lokale train .bin (Alternative zu --data_dir)")
+    p.add_argument("--val",         type=str, default=None)
+    p.add_argument("--data_dir",    type=str, default=None,
+                   help="Netz-Datenordner (von shard_data.py befüllt); zieht den "
+                        "eigenen Shard, statt lokale --train/--val zu brauchen")
     p.add_argument("--gpu",         type=int, default=0)
     p.add_argument("--shard_index", type=int, default=0)
     p.add_argument("--num_shards",  type=int, default=1)
@@ -95,8 +123,11 @@ def main():
                             betas=(0.9, 0.95), weight_decay=0.1,
                             fused=dev.use_fused_adam)
 
-    train_ds = CodeDataset(args.train, context_length=cfg.context_length)
-    if args.num_shards > 1:
+    train_path, val_path = resolve_data(args)
+    train_ds = CodeDataset(train_path, context_length=cfg.context_length)
+    if args.data_dir is None and args.num_shards > 1:
+        # lokaler Datensatz wird hier in den eigenen Shard geschnitten
+        # (bei --data_dir ist die Datei bereits der fertige Shard)
         shard = len(train_ds) // args.num_shards
         idx = list(range(args.shard_index * shard,
                          (args.shard_index + 1) * shard))
@@ -104,7 +135,7 @@ def main():
         print(f"[{args.worker_id}] Shard {args.shard_index}/{args.num_shards} "
               f"= {len(train_ds):,} Samples")
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(CodeDataset(args.val, context_length=cfg.context_length),
+    val_loader = DataLoader(CodeDataset(val_path, context_length=cfg.context_length),
                             batch_size=args.batch_size, shuffle=False)
 
     coord = IslandCoordinator(
