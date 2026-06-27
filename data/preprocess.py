@@ -19,6 +19,22 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
 # Tokenizer einbinden - falls noch nicht gebaut: Mock verwenden
+import ast
+import astunparse
+
+def remove_docstrings(code: str) -> str:
+    try:
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if (node.body and isinstance(node.body[0], ast.Expr) and
+                        isinstance(node.body[0].value, ast.Constant)):
+                    node.body.pop(0)
+                    if not node.body:
+                        node.body.append(ast.Pass())
+        return astunparse.unparse(tree)
+    except:
+        return code
 try:
     import tokenizer_cpp
     def load_tokenizer(vocab_path: str):
@@ -78,9 +94,6 @@ def chunk_ids(ids: list[int], context_length: int,
 # ─────────────────────────────────────────────
 
 def load_code_samples(languages: list[str]) -> list[str]:
-    """
-    Liest bereits heruntergeladene Daten aus data/raw/ statt nochmal HuggingFace zu laden.
-    """
     samples = []
     for lang in languages:
         path = Path(f"data/raw/{lang}.txt")
@@ -92,7 +105,11 @@ def load_code_samples(languages: list[str]) -> list[str]:
             for line in f:
                 line = line.strip()
                 if line:
-                    samples.append(line.replace("\\n", "\n"))
+                    code = line.replace("\\n", "\n")
+                    # Docstrings entfernen
+                    code = remove_docstrings(code)
+                    if code.strip():
+                        samples.append(code)
         print(f"  → {len(samples):,} Samples geladen")
     return samples
 

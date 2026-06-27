@@ -1,22 +1,14 @@
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint
 
-from model.config import ModelConfig, ModelConfigSmall
+from model.config import ModelConfig, ModelConfigSmall, ModelConfigMoE
 from model.embedding import Embedding
 from model.attention import MultiHeadAttention
+from model.moe import MoELayer
 
 
 class FeedForward(nn.Module):
-    """
-    Position-wise Feed-Forward Network.
-    Zwei lineare Schichten mit GELU Aktivierung dazwischen.
-
-    Linear(d_model, d_ff) → GELU → Dropout → Linear(d_ff, d_model)
-
-    Warum GELU statt ReLU?
-    - Smoothere Aktivierung, bessere Gradienten
-    - Wird von GPT-2/3 verwendet
-    """
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1):
         super().__init__()
         self.net = nn.Sequential(
@@ -32,48 +24,37 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """
-    Ein einzelner Transformer Block mit Pre-LayerNorm.
-
-    Pre-LayerNorm (stabiler als Post-LayerNorm):
-        x = x + Attention(LayerNorm(x))
-        x = x + FeedForward(LayerNorm(x))
-
-    Warum Pre-LayerNorm?
-    - Gradienten fließen stabiler durch den Residual Stream
-    - Kein Warmup nötig, Training stabiler
-    - GPT-2 verwendet auch Pre-LayerNorm
-    """
-    def __init__(self, d_model: int, n_heads: int,
-                 d_ff: int, dropout: float = 0.1):
+    def __init__(self, d_model: int, n_heads: int, d_ff: int,
+                 dropout: float = 0.1, use_moe: bool = False,
+                 n_experts: int = 8, top_k: int = 2):
         super().__init__()
         self.norm1     = nn.LayerNorm(d_model)
         self.attention = MultiHeadAttention(d_model, n_heads, dropout)
         self.norm2     = nn.LayerNorm(d_model)
-        self.ff        = FeedForward(d_model, d_ff, dropout)
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-        # Residual Connection + Attention
+        if use_moe:
+            self.ff = MoELayer(d_model, d_ff, n_experts, top_k, dropout)
+        else:
+            self.ff = FeedForward(d_model, d_ff, dropout)
+
+        self.use_moe = use_moe
+
+    def forward(self, x: torch.Tensor, mask=None) -> torch.Tensor:
         x = x + self.attention(self.norm1(x), mask)
-        # Residual Connection + FeedForward
         x = x + self.ff(self.norm2(x))
         return x
 
 
 class GPTModel(nn.Module):
-    """
-    Kompletter Decoder-only Transformer (GPT-Architektur).
-
-    Pipeline:
-        Token-IDs → Embedding + Positional Encoding
-                  → N × TransformerBlock
-                  → Final LayerNorm
-                  → Linear(d_model, vocab_size)  ← Logits, kein Softmax
-                                                    (CrossEntropyLoss macht Softmax intern)
-    """
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config, use_gradient_checkpointing: bool = False):
         super().__init__()
         self.config = config
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.layer_drop_rate = 0.0
+
+        use_moe   = hasattr(config, "n_experts")
+        n_experts = getattr(config, "n_experts", 8)
+        top_k     = getattr(config, "top_k", 2)
 
         self.embedding = Embedding(
             vocab_size=config.vocab_size,
@@ -82,42 +63,26 @@ class GPTModel(nn.Module):
             dropout=config.dropout,
         )
 
-        # Causal Mask vorberechnen: (1, 1, T, T)
-        # triu mit diagonal=1 → alles oberhalb der Hauptdiagonale = True = maskiert
-        mask = torch.triu(
-            torch.ones(config.context_length, config.context_length), diagonal=1
-        ).bool()
-        self.register_buffer("mask", mask.unsqueeze(0).unsqueeze(0))
-
         self.blocks = nn.ModuleList([
             TransformerBlock(
                 d_model=config.d_model,
                 n_heads=config.n_heads,
                 d_ff=config.d_ff,
                 dropout=config.dropout,
+                use_moe=use_moe,
+                n_experts=n_experts,
+                top_k=top_k,
             )
             for _ in range(config.n_layers)
         ])
 
-        self.norm = nn.LayerNorm(config.d_model)
-
-        # Logit-Projektion: d_model → vocab_size
+        self.norm    = nn.LayerNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-
-        # Weight Tying: Embedding-Matrix = LM-Head-Matrix
-        # Spart ~8M Parameter und verbessert oft die Performance
         self.lm_head.weight = self.embedding.token_embedding.embedding.weight
 
-        # Gewichte initialisieren
         self._init_weights()
 
     def _init_weights(self):
-        """
-        GPT-2 Style Initialisierung:
-        - Linear + Embedding: N(0, 0.02)
-        - Residual Projektionen skaliert mit 1/sqrt(n_layers)
-          damit der Residual Stream nicht zu groß wird
-        """
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -126,74 +91,80 @@ class GPTModel(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-        # Residual Projektionen skalieren
         for name, param in self.named_parameters():
-            if name.endswith("W_o.weight") or name.endswith("net.3.weight"):
+            # net.3 = dense FF Output-Proj, net.2 = MoE-Expert Output-Proj
+            if name.endswith("W_o.weight") or name.endswith("net.3.weight") \
+               or name.endswith("net.2.weight"):
                 nn.init.normal_(param, mean=0.0,
                                 std=0.02 / (2 * self.config.n_layers) ** 0.5)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (B, T) Token-IDs
-        → (B, T, vocab_size) Logits
-        """
-        B, T = x.shape
-        assert T <= self.config.context_length, \
-            f"Sequenz zu lang: {T} > {self.config.context_length}"
-
-        # Causal Mask auf aktuelle Sequenzlänge zuschneiden
-        mask = self.mask[:, :, :T, :T]
-
-        # Embedding + Positional Encoding
-        x = self.embedding(x)          # (B, T, d_model)
-
-        # N Transformer Blöcke
+    def get_load_balancing_loss(self) -> torch.Tensor:
+        loss = torch.tensor(0.0, device=next(self.parameters()).device)
         for block in self.blocks:
-            x = block(x, mask)
+            if isinstance(block.ff, MoELayer):
+                loss = loss + block.ff.load_balancing_loss
+        return loss
 
-        # Final LayerNorm
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T = x.shape
+        assert T <= self.config.context_length
+
+        x = self.embedding(x)
+
+        for block in self.blocks:
+            # Layer Dropping — in früher Trainingsphase Layer zufällig überspringen
+            if self.training and self.layer_drop_rate > 0:
+                if torch.rand(1) < self.layer_drop_rate:
+                    continue
+
+            if self.use_gradient_checkpointing and self.training:
+                x = torch.utils.checkpoint.checkpoint(
+                    block, x, None, use_reentrant=False)
+            else:
+                x = block(x)
+
         x = self.norm(x)
-
-        # Logits
-        return self.lm_head(x)         # (B, T, vocab_size)
+        return self.lm_head(x)
 
     @torch.no_grad()
-    def generate(
-        self,
-        input_ids: torch.Tensor,
-        max_new_tokens: int = 200,
-        temperature: float = 0.8,
-        top_k: int = 50,
-    ) -> torch.Tensor:
-        """
-        Autoregressive Texterzeugung mit Top-K Sampling.
-
-        input_ids: (1, T) Prompt Token-IDs
-        → (1, T + max_new_tokens) generierte Token-IDs
-        """
+    def generate(self, input_ids, max_new_tokens=200,
+                 temperature=0.8, top_k=50, top_p=0.0,
+                 repetition_penalty=1.3):
         for _ in range(max_new_tokens):
-            # Sequenz auf context_length kürzen falls nötig
-            ids = input_ids[:, -self.config.context_length:]
+            ids    = input_ids[:, -self.config.context_length:]
+            logits = self(ids)
+            logits = logits[:, -1, :]
 
-            # Forward Pass
-            logits = self(ids)                    # (1, T, vocab_size)
-            logits = logits[:, -1, :]             # nur letzter Token: (1, vocab_size)
+            # Repetition Penalty — bereits generierte Tokens abschwächen,
+            # verhindert Degeneration ("int, int, int, ...").
+            if repetition_penalty != 1.0:
+                for tok_id in set(input_ids[0].tolist()):
+                    if logits[0, tok_id] > 0:
+                        logits[0, tok_id] /= repetition_penalty
+                    else:
+                        logits[0, tok_id] *= repetition_penalty
+
             logits = logits / temperature
 
-            # Top-K: alle Logits außer den Top-K auf -inf setzen
             if top_k > 0:
                 values, _ = torch.topk(logits, top_k)
-                min_val = values[:, -1].unsqueeze(-1)
-                logits = logits.masked_fill(logits < min_val, float("-inf"))
+                logits = logits.masked_fill(
+                    logits < values[:, -1:], float("-inf"))
 
-            # Sampling
-            probs = torch.softmax(logits, dim=-1)
-            next_id = torch.multinomial(probs, num_samples=1)  # (1, 1)
+            # Nucleus (Top-p) Sampling — optional, oft besser als Top-k
+            if top_p > 0.0:
+                sorted_logits, sorted_idx = torch.sort(logits, descending=True)
+                cum_probs = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+                remove = cum_probs > top_p
+                remove[:, 1:] = remove[:, :-1].clone()
+                remove[:, 0]  = False
+                logits[0, sorted_idx[0, remove[0]]] = float("-inf")
 
+            probs     = torch.softmax(logits, dim=-1)
+            next_id   = torch.multinomial(probs, num_samples=1)
             input_ids = torch.cat([input_ids, next_id], dim=1)
 
-            # Bei EOS Token aufhören
-            if next_id.item() == 1:  # eos_token_id
+            if next_id.item() == 1:
                 break
 
         return input_ids
