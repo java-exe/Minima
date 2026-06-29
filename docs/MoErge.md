@@ -278,7 +278,33 @@ the full distributed build-out.
 - Expert diversity across islands (pairwise cosine similarity).
 - Communication volume per round; wall-clock to target loss vs. single-GPU.
 
-### 7.3 Ablations (research knobs)
+### 7.3 Preliminary result (2026-06-29, underpowered)
+
+A first light run of `run_probe.py` against the 48k checkpoint (2 workers,
+**only 60 local steps**, batch 4):
+
+| Strategy | val_loss | Δ vs no-sync |
+| --- | --- | --- |
+| no-sync (island 0) | 1.2092 | — |
+| naive average | **1.2014** | −0.0079 (best) |
+| migration (MoErge) | 1.2052 | −0.0041 |
+
+Dead experts on island 0: **5 → 1** (migration revived 4 of 5).
+
+**Interpretation.** Two separate signals. (a) Migration's headline mechanism —
+reviving dead experts by filling collapsed Layer-0 slots with migrants — *works*.
+(b) The core hypothesis (naive averaging harms MoE) **did not hold here**: naive
+averaging was the *best* strategy. This is expected at this divergence level —
+after only 60 steps from a shared checkpoint the islands' routers have barely
+re-specialized, so the experts are still nearly aligned and averaging is benign.
+The permutation/specialization conflict that breaks averaging is a
+**large-divergence** phenomenon. The run is therefore *underpowered*, not a
+falsification. The sharpened question: **at what divergence (local_steps, shard
+distinctness) does naive averaging break, and does migration overtake it there?**
+Next: sweep `local_steps` ∈ {250, 500, 1000, 2000} with more distinct shards and
+locate the crossover; also test a short router-only finetune after migration.
+
+### 7.4 Ablations (research knobs)
 
 Sync interval *H*; migration rate (experts swapped per sync); selection policy
 (elitist / tournament / fitness-proportional); redundancy-penalty strength;
@@ -300,9 +326,10 @@ backbone merge (plain average vs. DiLoCo outer optimizer); number of islands
 - **Live two-island merge** on one machine (two coordinators rendezvous through a
   shared folder, complete merge rounds, shut down cleanly).
 
-**Not yet done**
-- The **scientific result**: `run_probe.py` has not been run, so the core
-  hypothesis (migration ≥ averaging; dead experts revived) is *untested*.
+**Partial / in progress**
+- First probe run (§7.3): dead-expert revival confirmed (5 → 1), but the
+  naive-averaging-is-harmful premise did *not* appear at 60 steps of divergence
+  (naive average was best). Needs a divergence sweep to find the crossover.
 - Trusted aggregator + poisoning defenses (required before opening to outsiders).
 - DiLoCo outer optimizer for the backbone (currently plain averaging).
 - Contributor UX: VRAM auto-fit, idle/busy pause.
