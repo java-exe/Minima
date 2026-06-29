@@ -3,12 +3,12 @@ Ein Worker / eine GPU. Auf jeder Karte EINMAL starten.
 
 Ein Rechner, zwei GPUs (gemeinsamer lokaler Ordner):
     python merging/run_island.py --worker_id gpu0 --gpu 0 \
-        --shared_dir runs/moerge --shard_index 0 --num_shards 2 \
+        --shared_dir runs/archipelago --shard_index 0 --num_shards 2 \
         --ckpt training/checkpoints/run_moe_001/ckpt_step_0048000.pt \
         --train data/processed/train.bin --val data/processed/val.bin \
         --local_steps 300 --rounds 50
     python merging/run_island.py --worker_id gpu1 --gpu 1 \
-        --shared_dir runs/moerge --shard_index 1 --num_shards 2  ...(gleich)
+        --shared_dir runs/archipelago --shard_index 1 --num_shards 2  ...(gleich)
 
 Mehrere Rechner: identischer Aufruf, aber --shared_dir zeigt auf einen
 GETEILTEN Pfad (NFS / SMB / Syncthing / rclone-Mount / S3-FUSE).

@@ -6,7 +6,7 @@ statt den ganzen Datensatz manuell zu kopieren.
 Einmalig auf dem Daten-Halter (z.B. PC) ausführen:
     python merging/shard_data.py \
         --data data/processed/train.bin --val data/processed/val.bin \
-        --out_dir /synced/moerge/data --num_shards 2
+        --out_dir /synced/archipelago/data --num_shards 2
 
 Erzeugt:  train_shard_0_of_2.bin, train_shard_1_of_2.bin, val.bin
 

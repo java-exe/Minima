@@ -6,10 +6,10 @@ große .pt-Datei manuell zu kopieren.
 Beispiel (PC seedet einmalig den 48k-Checkpoint):
     python merging/seed.py \
         --ckpt training/checkpoints/run_moe_001/ckpt_step_0048000.pt \
-        --shared_dir /synced/moerge
+        --shared_dir /synced/archipelago
 
 Danach startet der Laptop ohne --ckpt und zieht die Gewichte aus dem Netz:
-    python merging/run_island.py --worker_id laptop --shared_dir /synced/moerge ...
+    python merging/run_island.py --worker_id laptop --shared_dir /synced/archipelago ...
 """
 import argparse
 import os

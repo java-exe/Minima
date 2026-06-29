@@ -1,4 +1,4 @@
-# MoErge: Island-Model Expert Migration for Low-Communication Distributed MoE Training
+# Archipelago: Island-Model Expert Migration for Low-Communication Distributed MoE Training
 
 **Project:** Minima — a small code language model and its distributed training research
 **Status:** system built and verified end-to-end; core scientific hypothesis not yet tested
@@ -14,7 +14,7 @@ infrequently (every few hundred local steps) over ordinary internet links. The
 central obstacle is that independently trained MoE replicas cannot be merged by
 naive weight averaging: each replica's router specializes its experts
 differently, so averaging expert *k* across replicas blends unrelated functions
-("permutation/specialization symmetry"). We propose **MoErge**, which reframes
+("permutation/specialization symmetry"). We propose **Archipelago**, which reframes
 distributed MoE training as an **island-model evolutionary process whose unit of
 selection is the individual expert**. Instead of averaging experts, islands
 **migrate** them as discrete units. The key mechanism that avoids the alignment
@@ -82,7 +82,7 @@ research contribution.
 *token-level top-k* MoE distributed training where the merge operator is
 *evolutionary expert migration* with *the expert and its router logits moving as
 one unit*. DiPaCo is path-level; Re-Basin aligns-then-averages; Sakana evolves
-merge recipes of finished models. MoErge differs on all three axes.
+merge recipes of finished models. Archipelago differs on all three axes.
 
 ---
 
@@ -220,7 +220,7 @@ Planned defenses, by return on effort:
 1. **Validation gating (highest ROI).** Evaluate each contribution on a held-out
    set; reject if it does not hold/improve loss, or shows NaNs/exploded norms. The
    `measure_expert_utilization` + val-loss machinery already exists.
-2. **MoErge is inherently more poison-resistant than gradient averaging.** An
+2. **Archipelago is inherently more poison-resistant than gradient averaging.** An
    expert enters the model only if it passes a trusted-probe fitness check, and a
    migrant expert can be **quarantined and evaluated in isolation** before
    acceptance — something gradient-averaging cannot do per-contributor.
@@ -247,7 +247,7 @@ check_moe_routing.py`) showed a **mild, localized collapse**: only Layer 0 had 3
 dead experts (its input is just embeddings + positional encoding, giving the
 router little signal), while Layers 1–11 were healthy. We re-enabled the auxiliary
 loss inside the gradient-accumulation loop and resumed. This is the exact
-condition MoErge's migration is designed to repair, and it gives the method a
+condition Archipelago's migration is designed to repair, and it gives the method a
 concrete in-house motivating story.
 
 ---
@@ -264,7 +264,7 @@ Implemented in `merging/run_probe.py`. From the current checkpoint:
 3. Compare post-sync validation loss across merge strategies:
    - **no-sync** baseline (each island alone),
    - **naive average** of experts,
-   - **MoErge migration** (expert + router-row).
+   - **Archipelago migration** (expert + router-row).
 4. Re-run the routing diagnostic to count revived dead experts.
 
 **Primary hypothesis:** `naive-average` loss is worse than `no-sync`, while
@@ -287,7 +287,7 @@ A first light run of `run_probe.py` against the 48k checkpoint (2 workers,
 | --- | --- | --- |
 | no-sync (island 0) | 1.2092 | — |
 | naive average | **1.2014** | −0.0079 (best) |
-| migration (MoErge) | 1.2052 | −0.0041 |
+| migration (Archipelago) | 1.2052 | −0.0041 |
 
 Dead experts on island 0: **5 → 1** (migration revived 4 of 5).
 

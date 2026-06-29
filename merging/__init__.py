@@ -1,5 +1,5 @@
 """
-MoErge — Island-Model Expert Migration für verteiltes MoE-Training.
+Archipelago — Island-Model Expert Migration für verteiltes MoE-Training.
 
 Kernidee: Experten werden NICHT gemittelt (Permutationsproblem), sondern als
 diskrete "Gene" zwischen Inseln (Workern) migriert. Ein Gen = die Experten-

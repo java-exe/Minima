@@ -1,5 +1,5 @@
 """
-Kill-or-Confirm-Experiment für MoErge (Expert Migration).
+Kill-or-Confirm-Experiment für Archipelago (Expert Migration).
 
 Forkt einen Checkpoint in N simulierte Worker, trainiert jeden auf einem
 EIGENEN Datenshard für ein paar hundert Steps, und vergleicht dann drei
