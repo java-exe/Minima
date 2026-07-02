@@ -42,25 +42,20 @@ class MoELayer(nn.Module):
             router_probs, self.top_k, dim=-1)
         top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
 
-    # Sparse Dispatch: jeden Experten NUR auf seinen zugewiesenen Token rechnen
-    # (statt alle Experten auf alle Token). Spart top_k/n_experts der FF-FLOPs.
-        output = torch.zeros_like(x_flat)
+    # Dense Dispatch: alle Experten auf alle Token, dann mit den Routing-
+    # Gewichten maskiert aufsummieren (nicht-Top-k Gewichte = 0). Auf kleinen
+    # GPUs ohne Triton/torch.compile (z.B. RTX 3060, eager) MESSBAR schneller
+    # als ein Sparse-Loop, dessen Boolean-Masking pro Experte einen GPU-Sync
+    # auslöst (hier ~1.25x auf den ganzen Step). Ergebnis ist identisch.
+        expert_outputs = torch.stack(
+            [expert(x_flat) for expert in self.experts], dim=0)  # (E, N, D)
 
-    # (token, slot) → flache Zuweisungslisten
-        flat_expert = top_k_indices.reshape(-1)               # (N*top_k,)
-        flat_prob   = top_k_probs.reshape(-1).unsqueeze(-1)   # (N*top_k, 1)
-        token_idx   = torch.arange(N, device=x.device).repeat_interleave(self.top_k)
-
-        for e, expert in enumerate(self.experts):
-            sel = token_idx[flat_expert == e]                 # Token für Experte e
-            # leeres sel ist ok (kein .any()-Check → kein GPU-Sync, compile-safe)
-            expert_out = expert(x_flat[sel]) * flat_prob[flat_expert == e]
-            output.index_add_(0, sel, expert_out.to(output.dtype))
-
-    # Load balancing — Routing-Gewichte wie zuvor rekonstruieren
         routing_weights = torch.zeros(
-            N, self.n_experts, device=x.device, dtype=router_probs.dtype)
+            N, self.n_experts, device=x.device, dtype=x_flat.dtype)
         routing_weights.scatter_(1, top_k_indices, top_k_probs)
+        output = (routing_weights.T.unsqueeze(-1) * expert_outputs).sum(dim=0)
+
+    # Load balancing
         fraction_prob   = router_probs.mean(dim=0)
         fraction_tokens = routing_weights.bool().float().mean(dim=0).detach()
         self.load_balancing_loss = (
