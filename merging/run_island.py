@@ -12,6 +12,15 @@ Ein Rechner, zwei GPUs (gemeinsamer lokaler Ordner):
 
 Mehrere Rechner: identischer Aufruf, aber --shared_dir zeigt auf einen
 GETEILTEN Pfad (NFS / SMB / Syncthing / rclone-Mount / S3-FUSE).
+
+WICHTIG — zwei Invarianten:
+  • --min_workers muss = Anzahl der Inseln sein, die pro Runde WIRKLICH mergen
+    sollen. min_workers=1 = best effort / nie blockieren, heißt aber: sobald der
+    eigene Snapshot geschrieben ist, wird solo gemergt (= kein Austausch). Für
+    echte Kollaboration min_workers>=2 setzen.
+  • Alle Inseln MÜSSEN dieselbe val.bin verwenden. Die Experten-Fitness und die
+    Champion-Wahl vergleichen Val-Losses inselübergreifend — mit verschiedenen
+    val-Shards wären diese Zahlen nicht vergleichbar.
 """
 import argparse
 import os
@@ -85,11 +94,31 @@ def main():
     p.add_argument("--force_fp16",  action="store_true",
                    help="bf16 erzwungen aus (für AMD-Karten ohne bf16)")
     p.add_argument("--min_workers", type=int, default=1,
-                   help="Auf so viele Inseln pro Runde warten (1 = nie blockieren)")
+                   help="Auf so viele Inseln pro Runde warten (1 = nie blockieren, "
+                        "aber dann KEIN Merge — für echten Austausch >=2 setzen)")
     p.add_argument("--collect_timeout", type=float, default=600.0)
     p.add_argument("--dead_threshold",  type=float, default=0.02)
+    p.add_argument("--eval_batches", type=int, default=20,
+                   help="Val-Batches für Loss/Champion-Ranking pro Runde")
+    p.add_argument("--keep_rounds",  type=int, default=3,
+                   help="So viele Runden im shared_dir behalten (Rest löschen). "
+                        "<=0 = nie aufräumen")
+    p.add_argument("--seed",        type=int, default=None,
+                   help="Zufalls-Seed für Reproduzierbarkeit")
     p.add_argument("--ckpt_dir",    type=str, default=None)
     args = p.parse_args()
+
+    if args.seed is not None:
+        import random
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+
+    if args.min_workers < 2:
+        print(f"[{args.worker_id}] WARNUNG: --min_workers={args.min_workers} → "
+              f"es wird solo gemergt (kein Insel-Austausch). Für echte "
+              f"Kollaboration --min_workers >=2 setzen.")
 
     dev = setup_device(prefer_index=args.gpu, force_fp16=args.force_fp16)
     device = dev.device
@@ -144,6 +173,7 @@ def main():
         transport=transport, worker_id=args.worker_id, dev=dev,
         local_steps=args.local_steps, lb_weight=lb_weight,
         min_workers=args.min_workers, collect_timeout=args.collect_timeout,
+        eval_batches=args.eval_batches, keep_rounds=args.keep_rounds,
         max_runtime_s=parse_duration(args.minutes),
         ckpt_dir=args.ckpt_dir,
         migrate_kw={"dead_threshold": args.dead_threshold, "verbose": False},

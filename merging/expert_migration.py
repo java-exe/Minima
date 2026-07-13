@@ -29,11 +29,36 @@ class IslandSnapshot:
     step: int
     state_dict: dict                      # CPU-Tensoren
     util: dict = field(default_factory=dict)   # {layer:int -> Tensor(n_experts)}
+    val_loss: float = float("nan")        # Held-out-Loss zum Zeitpunkt des Snapshots
 
     def to_cpu(self) -> "IslandSnapshot":
         self.state_dict = {k: v.detach().cpu() for k, v in self.state_dict.items()}
         self.util = {l: u.detach().cpu() for l, u in self.util.items()}
         return self
+
+    # ── sichere Serialisierung ─────────────────────────────────────────
+    # Über das Netz wandert NUR ein reines dict aus Tensoren/Skalaren, nie
+    # dieses Klassen-Objekt. So kann die Gegenseite mit weights_only=True laden
+    # (kein Pickle-Code-Execution durch fremde Worker → siehe transport.py).
+    def to_payload(self) -> dict:
+        self.to_cpu()
+        return {
+            "worker_id": str(self.worker_id),
+            "step": int(self.step),
+            "val_loss": float(self.val_loss),
+            "state_dict": self.state_dict,
+            "util": self.util,
+        }
+
+    @staticmethod
+    def from_payload(p: dict) -> "IslandSnapshot":
+        return IslandSnapshot(
+            worker_id=str(p["worker_id"]),
+            step=int(p.get("step", 0)),
+            state_dict=p["state_dict"],
+            util=p.get("util", {}),
+            val_loss=float(p.get("val_loss", float("nan"))),
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -118,15 +143,24 @@ def measure_expert_utilization(model, loader, n_batches: int, device) -> dict:
 # Migration — Gene zwischen N Inseln verschieben
 # ──────────────────────────────────────────────────────────────────────────
 def _inject_gene(dst_sd: dict, src_sd: dict, layer: int,
-                 dst_e: int, src_e: int) -> None:
-    """Experten-Gewichte UND Router-Zeile von (src_e) nach (dst_e) kopieren."""
+                 dst_e: int, src_e: int) -> list[str]:
+    """Experten-Gewichte UND Router-Zeile von (src_e) nach (dst_e) kopieren.
+
+    Gibt die Liste der veränderten state_dict-Schlüssel zurück, damit der
+    Aufrufer den (jetzt stalen) Optimizer-Zustand dieser Parameter zurücksetzen
+    kann — die Adam-Momente gehörten zum überschriebenen Experten.
+    """
+    changed: list[str] = []
     for k_src in _expert_param_keys(src_sd, layer, src_e):
         k_dst = k_src.replace(f".experts.{src_e}.", f".experts.{dst_e}.")
         dst_sd[k_dst] = src_sd[k_src].clone()
+        changed.append(k_dst)
     rk = _router_key(layer)
     row = dst_sd[rk].clone()
     row[dst_e] = src_sd[rk][src_e].clone()
     dst_sd[rk] = row
+    changed.append(rk)
+    return changed
 
 
 def migrate_experts(
@@ -138,25 +172,34 @@ def migrate_experts(
     sim_threshold: float = 0.95,
     prefer_cross_island: bool = True,
     verbose: bool = True,
-) -> list[dict]:
+    return_changed: bool = False,
+):
     """
     Migriert fitte Experten in schwache Slots — für N Inseln (N = len(states)).
 
     states  : Liste von state_dicts (CPU).
     utils   : Liste von {layer -> Tensor(n_experts)} (gleiche Reihenfolge).
     dead_threshold : Slots mit Auslastung < diesem Anteil gelten als "tot".
+                     Utilization misst LAST, nicht Qualität — die beiden fallen
+                     nur am toten Rand zusammen. Darum ist der Default die
+                     dead-Slot-Wiederbelebung, nicht bottom_k.
     bottom_k       : alternativ: pro Layer die k schwächsten Slots ersetzen.
+                     VORSICHT: verdrängt auch gesunde, aber selten genutzte
+                     Spezialisten — bewusst standardmäßig aus (None).
     sim_threshold  : Diversitätsschutz — Spender, die einem vorhandenen
                      Experten der Zielinsel zu ähnlich sind (cos > thr),
                      werden übersprungen (verhindert Homogenisierung).
+    return_changed : wenn True, zusätzlich pro Insel die Liste der veränderten
+                     state_dict-Schlüssel zurückgeben (für Optimizer-Reset).
 
     Gibt NEUE state_dicts zurück (Eingaben bleiben unberührt).
     """
     N = len(states)
     assert N == len(utils) and N >= 1
     out = [copy.deepcopy(s) for s in states]
+    changed: list[list[str]] = [[] for _ in range(N)]
     if N == 1:
-        return out  # eine Insel: nichts zu migrieren
+        return (out, changed) if return_changed else out  # eine Insel: nichts zu migrieren
 
     for L in moe_layers(states[0]):
         E = _n_experts(states[0], L)
@@ -186,12 +229,12 @@ def migrate_experts(
                 if donor is None:
                     continue
                 di, de, dfit = donor
-                _inject_gene(out[i], states[di], L, slot, de)
+                changed[i].extend(_inject_gene(out[i], states[di], L, slot, de))
                 surv_vecs.append(_expert_vector(states[di], L, de))
                 if verbose:
                     print(f"  L{L:2d}: island{i} slot{slot} <- "
                           f"island{di} expert{de} (fit {dfit:.3f})")
-    return out
+    return (out, changed) if return_changed else out
 
 
 def _pick_donor(states, pool, L, dst_island, surv_vecs,
@@ -238,8 +281,17 @@ def average_backbone(states: list[dict]) -> list[dict]:
     return out
 
 
-def merge_round(states: list[dict], utils: list[dict], **kw) -> list[dict]:
-    """Ein vollständiger Sync: erst Experten migrieren, dann Backbone mitteln."""
+def merge_round(states: list[dict], utils: list[dict],
+                return_changed: bool = False, **kw):
+    """Ein vollständiger Sync: erst Experten migrieren, dann Backbone mitteln.
+
+    return_changed=True ⇒ (merged_states, changed_keys_per_island). changed_keys
+    listet die durch Migration überschriebenen Parameter je Insel, damit der
+    Aufrufer deren stalen Optimizer-Zustand verwerfen kann.
+    """
+    if return_changed:
+        migrated, changed = migrate_experts(states, utils, return_changed=True, **kw)
+        return average_backbone(migrated), changed
     migrated = migrate_experts(states, utils, **kw)
     return average_backbone(migrated)
 
