@@ -211,6 +211,16 @@ For an **open** opt-in network, adversarial contributors are the central risk:
 - **Sybil attacks** — many fake workers to outvote honest ones.
 - **Free-riding** — junk submissions claiming credit.
 
+**Deserialization is the first line, before any of the below.** A snapshot from
+an untrusted peer is loaded on every other worker's machine. If it is loaded as a
+pickled Python object (`weights_only=False`), a malicious `.pt` executes arbitrary
+code on load — remote code execution, *before* any validation/aggregation logic
+ever sees the weights. The transport therefore serializes snapshots as **plain
+tensor/scalar dicts** and loads them with `weights_only=True`
+(`transport.py`: `to_payload`/`_load_snapshot`). Every defense below assumes the
+bytes have already been safely deserialized; none of them help if load itself is
+the exploit.
+
 **Architectural decision:** before opening beyond trusted machines, move from
 symmetric peer-averaging to a **trusted aggregator** that *validates then merges*,
 rather than letting any peer's weights flow directly into everyone's model.
@@ -320,11 +330,19 @@ backbone merge (plain average vs. DiLoCo outer optimizer); number of islands
   *and* router rows migrate; non-selected experts untouched; backbone averages).
 - Sparse MoE dispatch (top-k only), verified output-equivalent to the dense
   implementation (fp32 diff ~3e-7) so existing checkpoints stay valid.
-- Transport: publish / collect / dropout / rejoin / `fetch_latest`.
-- Coordinator: time-boxing and clean GPU give-back; backend-agnostic autocast.
+- Transport: publish / collect / dropout / rejoin / `fetch_latest`. Snapshots are
+  serialized as plain tensor dicts and loaded `weights_only=True` (no pickle RCE
+  from untrusted peers); a straggler settle-window on `collect` so 3rd+ islands of
+  the same round are not dropped; round GC (`prune`) so the shared dir is bounded.
+- Coordinator: time-boxing and clean GPU give-back; backend-agnostic autocast;
+  per-round held-out val loss with **champion selection** (best island saved as
+  `champion.pt`); optimizer-state reset for migrated experts + their router rows
+  so stale Adam moments don't kick the fresh migrants after a sync.
 - Network bootstrap of **model** (seed) and **data** (shards).
 - **Live two-island merge** on one machine (two coordinators rendezvous through a
-  shared folder, complete merge rounds, shut down cleanly).
+  shared folder, complete merge rounds, shut down cleanly). Note: real merging
+  requires `--min_workers >= 2`; `=1` is best-effort solo (never blocks, never
+  exchanges).
 
 **Partial / in progress**
 - First probe run (§7.3): dead-expert revival confirmed (5 → 1), but the

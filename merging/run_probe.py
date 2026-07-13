@@ -109,13 +109,23 @@ def main():
     p.add_argument("--probe_batches", type=int, default=20)
     p.add_argument("--eval_batches",  type=int, default=50)
     p.add_argument("--dead_threshold", type=float, default=0.02)
+    p.add_argument("--seed", type=int, default=1234,
+                   help="Seed für reproduzierbare Divergenz-Sweeps")
     args = p.parse_args()
+
+    import random
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = ModelConfigMoE()
     lb_weight = getattr(cfg, "load_balance_weight", 0.0)
 
-    base_sd = torch.load(args.ckpt, map_location="cpu")["model_state_dict"]
+    # eigener, vertrauenswürdiger Trainings-Checkpoint → weights_only=False ok
+    base_sd = torch.load(args.ckpt, map_location="cpu",
+                         weights_only=False)["model_state_dict"]
     train_ds = CodeDataset(args.train, context_length=cfg.context_length)
     val_ds   = CodeDataset(args.val,   context_length=cfg.context_length)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
